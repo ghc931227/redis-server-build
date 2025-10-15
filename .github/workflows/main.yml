@@ -10,41 +10,50 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container:
-      image: registry.access.redhat.com/ubi7:7.9
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
       
-    - name: Set up build environment
+    - name: Set up Docker
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Build Redis in RHEL 7.9 Container
       run: |
+        # 创建临时构建脚本
+        cat > build-redis.sh << 'EOF'
+        #!/bin/bash
+        set -e
+        
         # 安装必要的构建工具和依赖
         yum -y install wget make gcc pkgconfig
         
-    - name: Cache Redis source
-      uses: actions/cache@v3
-      with:
-        path: redis-7.2.11
-        key: ${{ runner.os }}-redis-7.2.11-source
+        # 下载 Redis 源码
+        wget https://github.com/redis/redis/archive/7.2.11.tar.gz
+        tar xzf 7.2.11.tar.gz
         
-    - name: Download Redis 7.2.11 source
-      run: |
-        if [ ! -d "redis-7.2.11" ]; then
-          wget https://github.com/redis/redis/archive/7.2.11.tar.gz
-          tar xzf 7.2.11.tar.gz
-        fi
-        
-    - name: Build Redis
-      run: |
+        # 编译 Redis
         cd redis-7.2.11
-        make MALLOC=libc  # 使用 libc malloc 以避免 jemalloc 相关问题
+        make MALLOC=libc
+        
+        # 复制编译好的二进制文件到共享目录
+        cp src/redis-server /output/
+        EOF
+        
+        # 创建输出目录
+        mkdir -p redis-build
+        
+        # 使用 Docker 运行 RHEL 7.9 容器进行编译
+        docker run --rm -v $(pwd)/build-redis.sh:/build-redis.sh \
+                       -v $(pwd)/redis-build:/output \
+                       registry.access.redhat.com/ubi7:7.9 \
+                       bash -c "chmod +x /build-redis.sh && /build-redis.sh"
         
     - name: Upload Redis binary as artifact
       uses: actions/upload-artifact@v4
       with:
         name: redis-server-7.2.11-rhel7.9
-        path: redis-7.2.11/src/redis-server
+        path: redis-build/redis-server
         
     - name: Create Release
       id: create_release
@@ -55,6 +64,6 @@ jobs:
         draft: false
         prerelease: false
         files: |
-          redis-7.2.11/src/redis-server
+          redis-build/redis-server
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
