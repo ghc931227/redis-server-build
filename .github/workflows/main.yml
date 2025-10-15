@@ -17,7 +17,7 @@ jobs:
       
     - name: Setup Redis
       id: setup-redis
-      uses: shogo82148/actions-setup-redis@v1
+      uses: shogo82148/actions-setup-redis@v1.42.1
       with:
         redis-version: '7.2.11'  # 指定精确版本
         auto-start: false  # 不自动启动 Redis，因为我们只需要二进制文件
