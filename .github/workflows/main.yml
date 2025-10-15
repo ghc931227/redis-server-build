@@ -9,10 +9,9 @@ on:
 
 jobs:
   build:
-    # 使用 RHEL 7.9 环境
     runs-on: ubuntu-latest
     container:
-      image: redhat/ubi7:7.9
+      image: registry.access.redhat.com/ubi7:7.9
     
     steps:
     - name: Checkout code
