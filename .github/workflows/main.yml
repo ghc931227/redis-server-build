@@ -1,0 +1,3 @@
+- name: actions-setup-redis
+
+  uses: shogo82148/actions-setup-redis@v1.42.1
