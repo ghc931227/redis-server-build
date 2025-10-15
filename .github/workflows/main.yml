@@ -9,64 +9,32 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Setup Redis
-      id: setup-redis
-      uses: shogo82148/actions-setup-redis@v1.42.1
-      with:
-        redis-version: '7.2.11'  # 指定精确版本
-        auto-start: false  # 不自动启动 Redis，因为我们只需要二进制文件
-        
-    - name: Copy Redis binary
-      run: |
-        mkdir -p redis-build
-        # 复制 redis-server 二进制文件到工作目录
-        cp $(which redis-server) redis-build/
-        # 检查版本确认正确
-        redis-server --version
-        
-    - name: Upload Redis binary as artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: redis-server-7.2.11
-        path: redis-build/redis-server
-        
-    - name: Create Release
-      id: create_release
-      uses: softprops/action-gh-release@v1
-      if: startsWith(github.ref, 'refs/tags/')
-      with:
-        name: Redis Server 7.2.11
-        draft: false
-        prerelease: false
-        files: |
-          redis-build/redis-server
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        
-  build-rhel:
+    # 使用 RHEL 7.9 环境
     runs-on: ubuntu-latest
     container:
       image: redhat/ubi7:7.9
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v3
       
     - name: Set up build environment
       run: |
         # 安装必要的构建工具和依赖
         yum -y install wget make gcc pkgconfig
         
+    - name: Cache Redis source
+      uses: actions/cache@v3
+      with:
+        path: redis-7.2.11
+        key: ${{ runner.os }}-redis-7.2.11-source
+        
     - name: Download Redis 7.2.11 source
       run: |
-        wget https://github.com/redis/redis/archive/7.2.11.tar.gz
-        tar xzf 7.2.11.tar.gz
+        if [ ! -d "redis-7.2.11" ]; then
+          wget https://github.com/redis/redis/archive/7.2.11.tar.gz
+          tar xzf 7.2.11.tar.gz
+        fi
         
     - name: Build Redis
       run: |
@@ -74,13 +42,13 @@ jobs:
         make MALLOC=libc  # 使用 libc malloc 以避免 jemalloc 相关问题
         
     - name: Upload Redis binary as artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v3
       with:
         name: redis-server-7.2.11-rhel7.9
         path: redis-7.2.11/src/redis-server
         
-    - name: Create Release for RHEL build
-      id: create_release_rhel
+    - name: Create Release
+      id: create_release
       uses: softprops/action-gh-release@v1
       if: startsWith(github.ref, 'refs/tags/')
       with:
