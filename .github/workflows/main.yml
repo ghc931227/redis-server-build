@@ -36,8 +36,9 @@ jobs:
         cd redis-7.2.11
         make MALLOC=libc
         
-        # 复制编译好的二进制文件到共享目录
-        cp src/redis-server /output/
+        # 复制所有编译好的二进制文件到共享目录
+        mkdir -p /output/bin
+        cp src/redis-server src/redis-cli src/redis-benchmark src/redis-check-aof src/redis-check-rdb /output/bin/
         EOF
         
         # 创建输出目录
@@ -49,21 +50,25 @@ jobs:
                        registry.access.redhat.com/ubi7:7.9 \
                        bash -c "chmod +x /build-redis.sh && /build-redis.sh"
         
-    - name: Upload Redis binary as artifact
+    - name: Upload Redis binaries as artifact
       uses: actions/upload-artifact@v4
       with:
-        name: redis-server-7.2.11-rhel7.9
-        path: redis-build/redis-server
+        name: redis-7.2.11-rhel7.9
+        path: redis-build/bin/
         
     - name: Create Release
       id: create_release
       uses: softprops/action-gh-release@v1
       if: startsWith(github.ref, 'refs/tags/')
       with:
-        name: Redis Server 7.2.11 (RHEL 7.9)
+        name: Redis 7.2.11 (RHEL 7.9)
         draft: false
         prerelease: false
         files: |
-          redis-build/redis-server
+          redis-build/bin/redis-server
+          redis-build/bin/redis-cli
+          redis-build/bin/redis-benchmark
+          redis-build/bin/redis-check-aof
+          redis-build/bin/redis-check-rdb
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
