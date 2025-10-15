@@ -1,8 +1,9 @@
-name: Build and Publish Redis
+name: Build and Release Redis
 
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -10,19 +11,282 @@ jobs:
     strategy:
       matrix:
         os:
-          - "rhel-7.9"
-        redis:
-          - "7.2.11"
-    name: Redis ${{ matrix.redis }} on ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Setup redis
-        uses: shogo82148/actions-setup-redis@v1
-        with:
-          redis-version: ${{ matrix.redis }}
-          auto-start: "false"
+          - "ubuntu-latest"
+          - "macos-latest"
+        redis_version:
+          - "7.2"
+          - "7.0"
+          - "6.2"
+    name: Build Redis ${{ matrix.redis_version }} on ${{ matrix.os }}
 
-      - name: tests with Test::RedisServer
-        run: |
-          cpanm Test::RedisServer
-          prove -lv t
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Redis
+      id: setup-redis
+      uses: shogo82148/actions-setup-redis@v1
+      with:
+        redis-version: ${{ matrix.redis_version }}
+        auto-start: "false"  # 只安装不启动
+
+    - name: Get Redis binary info
+      id: redis-info
+      run: |
+        REDIS_SERVER_PATH=$(which redis-server)
+        REDIS_CLI_PATH=$(which redis-cli)
+        
+        echo "Redis Server Path: $REDIS_SERVER_PATH"
+        echo "Redis CLI Path: $REDIS_CLI_PATH"
+        
+        # 获取版本信息
+        redis-server --version
+        redis-cli --version
+        
+        # 保存路径信息
+        echo "server-path=$REDIS_SERVER_PATH" >> $GITHUB_OUTPUT
+        echo "cli-path=$REDIS_CLI_PATH" >> $GITHUB_OUTPUT
+
+    - name: Create Redis package directory
+      run: |
+        mkdir -p redis-package/bin
+        mkdir -p redis-package/etc
+        mkdir -p redis-package/data
+        mkdir -p redis-package/logs
+
+    - name: Copy Redis binaries and create package
+      run: |
+        # 复制 Redis 二进制文件
+        cp ${{ steps.redis-info.outputs.server-path }} redis-package/bin/
+        cp ${{ steps.redis-info.outputs.cli-path }} redis-package/bin/
+        
+        # 复制其他 Redis 工具
+        cp $(which redis-benchmark) redis-package/bin/ 2>/dev/null || echo "redis-benchmark not found"
+        cp $(which redis-check-aof) redis-package/bin/ 2>/dev/null || echo "redis-check-aof not found"
+        cp $(which redis-check-rdb) redis-package/bin/ 2>/dev/null || echo "redis-check-rdb not found"
+        
+        # 创建默认配置文件
+        cat > redis-package/etc/redis.conf << EOF
+        # Redis configuration file
+        port 6379
+        bind 0.0.0.0
+        daemonize no
+        dir ./data
+        logfile ./logs/redis.log
+        maxmemory 256mb
+        maxmemory-policy allkeys-lru
+        save 900 1
+        save 300 10
+        save 60 10000
+        EOF
+        
+        # 创建启动脚本
+        cat > redis-package/start-redis.sh << 'EOF'
+        #!/bin/bash
+        DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+        $DIR/bin/redis-server $DIR/etc/redis.conf
+        EOF
+        
+        chmod +x redis-package/start-redis.sh
+        
+        # 创建版本信息文件
+        echo "Redis Version: ${{ matrix.redis_version }}" > redis-package/VERSION
+        echo "Build OS: ${{ matrix.os }}" >> redis-package/VERSION
+        echo "Build Date: $(date -u)" >> redis-package/VERSION
+        echo "GitHub Run ID: ${{ github.run_id }}" >> redis-package/VERSION
+
+    - name: Create platform-specific archive
+      run: |
+        # 根据操作系统创建不同的压缩包
+        if [ "$RUNNER_OS" == "Linux" ]; then
+          ARCHIVE_NAME="redis-${{ matrix.redis_version }}-linux-amd64.tar.gz"
+        elif [ "$RUNNER_OS" == "macOS" ]; then
+          ARCHIVE_NAME="redis-${{ matrix.redis_version }}-macos-amd64.tar.gz"
+        else
+          ARCHIVE_NAME="redis-${{ matrix.redis_version }}-$RUNNER_OS.tar.gz"
+        fi
+        
+        tar -czf $ARCHIVE_NAME -C redis-package .
+        echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
+        
+        # 显示压缩包内容
+        echo "Archive contents:"
+        tar -tzf $ARCHIVE_NAME | head -20
+
+    - name: Create checksum
+      run: |
+        sha256sum ${{ env.ARCHIVE_NAME }} > ${{ env.ARCHIVE_NAME }}.sha256
+        echo "Checksum:"
+        cat ${{ env.ARCHIVE_NAME }}.sha256
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: redis-${{ matrix.redis_version }}-${{ matrix.os }}
+        path: |
+          ${{ env.ARCHIVE_NAME }}
+          ${{ env.ARCHIVE_NAME }}.sha256
+        retention-days: 30
+
+  release:
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    name: Create Release Assets
+
+    steps:
+    - name: Download all build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: ./artifacts
+
+    - name: List downloaded artifacts
+      run: |
+        find ./artifacts -type f -name "*.tar.gz" | sort
+        echo "Total files:"
+        find ./artifacts -type f -name "*.tar.gz" | wc -l
+
+    - name: Prepare release assets
+      run: |
+        mkdir -p release-assets
+        
+        # 复制所有压缩包和校验文件
+        find ./artifacts -name "*.tar.gz" -exec cp {} release-assets/ \;
+        find ./artifacts -name "*.sha256" -exec cp {} release-assets/ \;
+        
+        # 创建统一的校验文件
+        cd release-assets
+        sha256sum *.tar.gz > SHA256SUMS
+        echo "All checksums:"
+        cat SHA256SUMS
+
+    - name: Create release notes
+      run: |
+        cat > release-assets/README.md << EOF
+        # Redis Builds
+        
+        This release contains pre-built Redis binaries for different platforms.
+        
+        ## Available Builds
+        
+        EOF
+        
+        # 动态生成构建列表
+        for file in release-assets/*.tar.gz; do
+          if [ -f "$file" ]; then
+            filename=$(basename "$file")
+            size=$(du -h "$file" | cut -f1)
+            echo "- \`$filename\` ($size)" >> release-assets/README.md
+          fi
+        done
+        
+        cat >> release-assets/README.md << EOF
+        
+        ## Installation
+        
+        \`\`\`bash
+        # Extract the archive
+        tar -xzf redis-<version>-<platform>.tar.gz
+        
+        # Start Redis
+        cd redis-<version>-<platform>
+        ./start-redis.sh
+        \`\`\`
+        
+        ## Verification
+        
+        Verify the integrity of downloaded files:
+        
+        \`\`\`bash
+        # Verify individual file
+        sha256sum -c redis-<version>-<platform>.tar.gz.sha256
+        
+        # Or verify all files
+        sha256sum -c SHA256SUMS
+        \`\`\`
+        
+        ## Contents
+        
+        Each archive contains:
+        - Redis server binary
+        - Redis CLI client
+        - Benchmark and utility tools
+        - Default configuration
+        - Startup script
+        
+        ## Build Information
+        - Release: ${{ github.event.release.tag_name }}
+        - Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+        - Build ID: ${{ github.run_id }}
+        EOF
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          release-assets/*.tar.gz
+          release-assets/*.sha256
+          release-assets/SHA256SUMS
+          release-assets/README.md
+        body_path: release-assets/README.md
+        draft: false
+        prerelease: ${{ contains(github.event.release.tag_name, 'rc') || contains(github.event.release.tag_name, 'beta') || contains(github.event.release.tag_name, 'alpha') }}
+
+  deploy-docker:
+    needs: build
+    if: github.event_name == 'release' && !contains(github.event.release.tag_name, 'rc')
+    runs-on: ubuntu-latest
+    name: Build and Deploy Docker Image
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Log in to Docker Hub
+      if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+        
+    - name: Build and push Redis Docker image
+      if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        push: true
+        tags: |
+          ${{ secrets.DOCKERHUB_USERNAME }}/redis:latest
+          ${{ secrets.DOCKERHUB_USERNAME }}/redis:${{ github.event.release.tag_name }}
+        labels: |
+          org.opencontainers.image.version=${{ github.event.release.tag_name }}
+          org.opencontainers.image.created=${{ fromJSON(github.event.release.published_at) }}
+          
+    - name: Docker Hub description
+      if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+      uses: peter-evans/dockerhub-description@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+        repository: ${{ secrets.DOCKERHUB_USERNAME }}/redis
+
+  notify:
+    needs: [release, deploy-docker]
+    if: always()
+    runs-on: ubuntu-latest
+    name: Notify Build Status
+    
+    steps:
+    - name: Build status notification
+      run: |
+        if ${{ needs.release.result == 'success' }}; then
+          echo "✅ Redis build and release completed successfully!"
+          echo "Release: ${{ github.event.release.html_url }}"
+        else
+          echo "❌ Redis build or release failed"
+          exit 1
+        fi
